@@ -3,6 +3,7 @@ layout: default
 title: From Scratch - HA
 parent: Installation
 gran_parent: OpenStack
+nav_order: 1
 ---
 
 # OpenStack Queens from scratch on CentOS
@@ -21,7 +22,7 @@ gran_parent: OpenStack
 ## Prepare the hosts
 
 ```
-sed -e 's/SELINUX=.*/SELINUX=disabled/' /etc/selinux/config -i
+sed -e 's/SELINUX=.*/SELINUX=permissive/' /etc/selinux/config -i
 setenforce 0
 
 systemctl stop firewalld
