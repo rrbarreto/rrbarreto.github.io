@@ -46,7 +46,7 @@ EOF
 
 ## Kolla node
 
-1. Install
+### Install
 ```
 yum install -y epel-release
 yum install -y python-pip
@@ -55,7 +55,7 @@ yum install -y python-devel libffi-devel gcc openssl-devel libselinux-python
 pip install kolla-ansible
 ```
 
-2. Inventory
+### Inventory
 ```
 cp -r /usr/share/kolla-ansible/etc_examples/kolla /etc/kolla/
 cp /usr/share/kolla-ansible/ansible/inventory/* .
@@ -91,7 +91,7 @@ controllernode02
 ansible -i ~/multinode -m ping all
 ```
 
-3. Edit the globals.yml file as follow:
+### Edit the globals.yml file as follow:
 ```
 ...
 kolla_base_distro: "centos" 
@@ -134,12 +134,12 @@ nova_backend_ceph: "yes"
 ...
 ```
 
-4. Generate random passwords
+### Generate random passwords
 ```
 kolla-genpwd
 ```
 
-5. Openstak custom config
+### Openstak custom config
 ```
 [root@kollanode ~]# tree /etc/kolla/config
 /etc/kolla/config
@@ -296,7 +296,7 @@ EOF
 
 ```
 
-6. Deploy
+### Deploy
 ```
 kolla-ansible -i ~/multinode bootstrap-servers
 
@@ -308,4 +308,4 @@ kolla-ansible -i ~/multinode deploy
 kolla-ansible -i ~/multinode mariadb_recovery
 ```
 ---
-That's it
+That's it =)
