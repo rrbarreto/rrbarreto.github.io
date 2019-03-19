@@ -1,21 +1,26 @@
-﻿---
+---
 layout: default
-title: From Scratch
+title: From Scratch - HA
 parent: Installation
 gran_parent: OpenStack
-#nav_exclude: true
 ---
 
-################################## Topology
+# OpenStack Queens from scratch on CentOS
 
-3 controller nodes
-192.168.24.0/24 eth0
-eth1 br-ex
-nova, glance, cinder on external ceph
+---
 
+## Topology
 
-################################## Prepare the hosts
+* In this topology will be used 3 controller nodes with pacemaker/corosync managed;
+* Both connections APIs and tenants will trough the network 192.168.24.0/24 on eth0 interface;
+* Public external network will trough eth1 interface using neutron linuxbridge;
+* Nova Compute, Glance, Cinder on external Ceph;
 
+---
+
+## Prepare the hosts
+
+```
 sed -e 's/SELINUX=.*/SELINUX=disabled/' /etc/selinux/config -i
 setenforce 0
 
@@ -36,20 +41,25 @@ cat << EOF >> /etc/hosts
 192.168.24.254  db.localdomain                db
 EOF
 
-* enable extra repo to install openstack repo
+
+* enable CentOS extra repo if it isn't already enabled to install openstack repo
+
 yum install -y centos-release-openstack-queens yum-utils yum-priorities
 yum-config-manager --enable centos-openstack-queens --setopt="centos-openstack-queens.priority=10"
 yum install -y python-openstackclient openstack-selinux
 yum update -y && yum upgrade -y
 reboot
+```
+---
 
-################################## NTP
+## NTP config
 
 
-1. Controller nodes
+#### Controller nodes
 
-
+```
 yum -y install chrony
+
 cat << EOF > /etc/chrony.conf
 server a.ntp.br iburst
 server b.ntp.br iburst
@@ -60,33 +70,37 @@ makestep 1.0 3
 rtcsync
 logdir /var/log/chrony
 EOF
+
 systemctl enable chronyd.service
 systemctl start chronyd.service
+
 chronyc sources
-	
+```
 
-2. Compute nodes
+#### Compute nodes
 
-
+```
 yum install -y chrony
+
 cat <<EOF >  /etc/chrony.conf
 server controllernode00.localdomain iburst
 server controllernode01.localdomain iburst
 server controllernode02.localdomain iburst
 EOF
+
 systemctl enable chronyd.service
 systemctl start chronyd.service
+
 chronyc sources
-	
+```
+---
 
-	
-
-################################## Cluster pacemaker/corosync
-
-
-1. Configure cluster
+## Configure pacemaker/corosync on controller nodes
 
 
+#### Pacemaker cluster setup
+
+```
 yum install -y pacemaker pcs corosync
 
 systemctl enable pcsd pacemaker corosync
@@ -95,21 +109,27 @@ systemctl restart pcsd
 
 echo CHANGEME | passwd --stdin hacluster
 
+
 * from controllernode00
 pcs cluster auth controllernode00 controllernode01 controllernode02 -u hacluster -p CHANGEME --force
 pcs cluster setup --force --name openstack controllernode00 controllernode01 controllernode02
 pcs cluster start --all
+
 pcs property set stonith-enabled=false
+```
 
 
-
-2. Create VIPs
+#### VIP create
+```
 pcs resource create vip ocf:heartbeat:IPaddr2 cidr_netmask=24 ip=192.168.24.254 op monitor interval=30s on-fail=restart start interval=0s on-fail=restart stop interval=0s timeout=20s
-	
+```
+---
 
-################################## Haproxy
+## Configure OpenStack infra services
 
+### Haproxy
 
+```
 yum install -y haproxy
 
 cat << EOF > /etc/haproxy/haproxy.cfg
@@ -129,9 +149,9 @@ defaults
  option redispatch
  timeout connect 30s
  timeout client 70m
- timeout server 70m 
- timeout check 10s 
- timeout queue 2m 
+ timeout server 70m
+ timeout check 10s
+ timeout queue 2m
  timeout http-request 30s
 
 ## status of haproxy
@@ -277,20 +297,19 @@ listen heat_orchestration
  server controllernode01 controllernode01.localdomain:8004 check weight 1
  server controllernode02 controllernode02.localdomain:8004 check weight 1
 EOF
-
-
+```
+#### haproxy resource create
+```
 pcs resource create haproxy systemd:haproxy op monitor interval=30s on-fail=restart start interval=0s on-fail=restart stop interval=0s timeout=100 meta failure-timeout=60s migration-threshold=2 target-role=Started
-
 
 pcs constraint order vip then haproxy id=order-vip-haproxy-mandatory
 
 pcs constraint colocation add vip with haproxy id=colocation-vip-haproxy-INFINITY
-	
+```
 
+### Database
 
-################################## Database
-
-
+```
 yum install -y mariadb-galera-server mariadb MySQL-python galera rsync xinetd
 
 
@@ -367,6 +386,7 @@ max_allowed_packet = 16M
 quick
 EOF
 
+
 sed -i 's/192.168.24.2/192.168.24.3/g' /etc/my.cnf.d/galera.cnf
 sed -i 's/192.168.24.2/192.168.24.4/g' /etc/my.cnf.d/galera.cnf
 
@@ -406,49 +426,64 @@ systemctl enable xinetd
 systemctl restart xinetd
 
 /usr/libexec/mysqld --wsrep-new-cluster &
+
 mysqladmin password 'CHANGEME'
+
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'CHANGEME' WITH GRANT OPTION; FLUSH PRIVILEGES"
+
 mysql -u root -p'CHANGEME' -e "CREATE USER 'haproxy_check'@'%';"
 
 
 killall mysqld
+```
+
+#### MariaDB Galera resource create
+
+```
 pcs resource create galera 'ocf:heartbeat:galera' enable_creation=true wsrep_cluster_address="gcomm://controllernode00.localdomain,controllernode01.localdomain,controllernode02.localdomain" additional_parameters=--open-files-limit=16384 meta master-max=3 ordered=true op promote timeout=300s on-fail=block master
-	
+```
 
+### RabbitMQ
 
-
-
-
-################################## RabbitMQ
-
-
+```
 yum -y install rabbitmq-server
+
 systemctl start rabbitmq-server
 rabbitmqctl stop_app
 rabbitmqctl reset
 systemctl stop rabbitmq-server
+
+* copy erlang cookie from controllernode00 to both other controller nodes
 scp /var/lib/rabbitmq/.erlang.cookie  root@controllernode01:/var/lib/rabbitmq/
 scp /var/lib/rabbitmq/.erlang.cookie root@controllernode02:/var/lib/rabbitmq/
+
 echo '[rabbitmq_management].' > /etc/rabbitmq/enabled_plugins
+
 chown rabbitmq:rabbitmq /var/lib/rabbitmq/.erlang.cookie
+
 chmod 400 /var/lib/rabbitmq/.erlang.cookie
+
 
 * from both controllernode01 and controllernode02
 rabbitmqctl stop_app
 rabbitmqctl join_cluster rabbit@controllernode00
+```
+#### rabbitmq resource create
 
-
+```
 pcs resource create rabbitmq-server  systemd:rabbitmq-server op monitor start-delay=20s meta ordered=true interleave=true --clone
+```
+#### rabbitmq user create
 
-
+```
 rabbitmqctl add_user rabbit-user CHANGEME
 rabbitmqctl set_permissions rabbit-user ".*" ".*" ".*"
 rabbitmqctl set_policy ha-all '^(?!amq\.).*' '{"ha-mode": "all"}'
-	
+```
 
-################################## MemcacheD
+### MemcacheD
 
-
+```
 yum install -y memcached
 
 
@@ -459,18 +494,20 @@ MAXCONN="8192"
 CACHESIZE="1024"
 OPTIONS="-l 192.168.24.2" << CHANGE ME
 EOF
+```
+#### memcached resource create
 
-
+```
 pcs resource create memcached systemd:memcached meta interleave=true op monitor start-delay=20s --clone
-	
+```
+---
 
+## Configure OpenStack services
 
+### Keystone
 
-################################## OpenStack Keystone 
-
-
+```
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE keystone;"
-
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 
@@ -640,32 +677,32 @@ rsync -av /etc/keystone/credential-keys controllernode01:/etc/keystone
 rsync -av /etc/keystone/credential-keys controllernode02:/etc/keystone
 
 
-keystone-manage bootstrap --bootstrap-password CHANGEME                  \
+keystone-manage bootstrap --bootstrap-password CHANGEME        \
 --bootstrap-admin-url http://api.localdomain:5000/v3/          \
---bootstrap-internal-url http://api.localdomain:5000/v3/         \
---bootstrap-public-url http://api.localdomain:5000/v3/          \
+--bootstrap-internal-url http://api.localdomain:5000/v3/       \
+--bootstrap-public-url http://api.localdomain:5000/v3/         \
 --bootstrap-region-id RegionOne
 
 
-systemctl disable httpd.service 
+systemctl disable httpd.service
 systemctl stop httpd.service
+```
 
+#### keystone resource create
 
+```
 pcs resource create httpd systemd:httpd meta interleave=true op monitor start-delay=10s --clone
-
 
 pcs constraint order haproxy then httpd-clone id=order-haproxy-httpd-clone-mandatory
 pcs constraint order memcached-clone then httpd-clone id=order-memcached-clone-httpd-clone-mandatory
 pcs constraint order rabbitmq-server-clone then httpd-clone id=order-rabbitmq-server-clone-httpd-clone-mandatory
+pcs constraint order promote galera-master then start openstack-keystone-clone id=order-galera-master-openstack-keystone-clone-mandatory
+```
 
+#### keystone post configure
 
-# so quando banco tiver ok pacemaker
-promote galera-master then start openstack-keystone-clone (kind:Mandatory) (id:order-galera-master-openstack-keystone-clone-mandatory)
-
-
-
-
-cat << EOF > admin-openrc 
+```
+cat << EOF > admin-openrc
 #
 export OS_USERNAME=admin
 export OS_PASSWORD=CHANGEME
@@ -676,23 +713,18 @@ export OS_AUTH_URL=http://api.localdomain:35357/v3
 export OS_IDENTITY_API_VERSION=3
 export OS_AUTH_TYPE=password
 EOF
+
 source admin-openrc
 
-
 openstack project create --domain default --description "Service Project" service
-	
+```
 
+### Glance
 
-
-################################## OpenStack Glance
-
-
+```
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE glance;"
-
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
-
-
 
 
 openstack user create --domain default --password CHANGEME glance
@@ -736,7 +768,7 @@ project_domain_name = default
 user_domain_name = default
 project_name = service
 username = glance
-password = CHANGEME 
+password = CHANGEME
 [paste_deploy]
 flavor = keystone
 EOF
@@ -746,7 +778,7 @@ sed -i 's/192.168.24.2/192.168.24.3/' /etc/glance/glance-api.conf
 sed -i 's/192.168.24.2/192.168.24.4/' /etc/glance/glance-api.conf
 
 
-cat << EOF > /etc/glance/glance-registry.conf 
+cat << EOF > /etc/glance/glance-registry.conf
 [DEFAULT]
 bind_host = 192.168.24.2
 [database]
@@ -776,46 +808,39 @@ su -s /bin/sh -c "glance-manage db_sync" glance
 
 systemctl disable openstack-glance-api.service openstack-glance-registry.service
 systemctl stop openstack-glance-api.service openstack-glance-registry.service
+```
 
+#### glance resource create
 
+```
 pcs resource create openstack-glance-registry systemd:openstack-glance-registry meta interleave=true op monitor start-delay=60s --clone
-
-
 pcs resource create openstack-glance-api systemd:openstack-glance-api meta interleave=true op monitor start-delay=60s --clone
 
-
-
-
 pcs constraint order httpd-clone then openstack-glance-registry-clone id=order-httpd-clone-openstack-glance-registry-clone-mandatory
-
-
 pcs constraint order openstack-glance-registry-clone then openstack-glance-api-clone id=order-openstack-glance-registry-clone-openstack-glance-api-clone-mandatory
 
 pcs constraint colocation add openstack-glance-api-clone with openstack-glance-registry-clone id=colocation-openstack-glance-api-clone-openstack-glance-registry-clone-INFINITY rsc-role=Started with-rsc-role=Master
+```
 
-
-
+#### glance post configure
+```
 wget http://download.cirros-cloud.net/0.3.6/cirros-0.3.6-x86_64-disk.img
 
-
 openstack image create "cirros" --file cirros-0.3.6-x86_64-disk.img --disk-format qcow2 --container-format bare --public
+```
 
+### Nova
 
-	################################## OpenStack Nova
-
-
+```
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE nova;"
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE nova_api;"
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE nova_cell0;"
 
-
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 
-
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
-
 
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
@@ -844,7 +869,7 @@ yum install -y openstack-nova-api openstack-nova-conductor \
   openstack-nova-scheduler openstack-nova-placement-api
 
 
-cat << EOF > /etc/nova/nova.conf 
+cat << EOF > /etc/nova/nova.conf
 [DEFAULT]
 transport_url = rabbit://rabbit-user:CHANGEME@controllernode00.localdomain:5672,rabbit-user:CHANGEME@controllernode01.localdomain:5672,rabbit-user:CHANGEME@controllernode02.localdomain:5672/
 my_ip = 192.168.24.2
@@ -919,7 +944,7 @@ EOF
 sed -i 's/192.168.24.2/192.168.24.3/g' /etc/nova/nova.conf
 sed -i 's/192.168.24.2/192.168.24.4/g' /etc/nova/nova.conf
 
-cat << EOF > /etc/httpd/conf.d/00-nova-placement-api.conf 
+cat << EOF > /etc/httpd/conf.d/00-nova-placement-api.conf
 Listen 192.168.24.2:8778
 
 
@@ -956,6 +981,8 @@ Alias /nova-placement-api /usr/bin/nova-placement-api
  Require all granted  
 </Location>
 EOF
+
+
 sed -i 's/192.168.24.2/192.168.24.3/g' /etc/httpd/conf.d/00-nova-placement-api.conf
 sed -i 's/192.168.24.2/192.168.24.4/g' /etc/httpd/conf.d/00-nova-placement-api.conf
 
@@ -964,14 +991,8 @@ systemctl restart httpd
 
 
 su -s /bin/sh -c "nova-manage api_db sync" nova
-
-
 su -s /bin/sh -c "nova-manage cell_v2 map_cell0" nova
-
-
 su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
-
-
 su -s /bin/sh -c "nova-manage db sync" nova
 
 
@@ -981,60 +1002,39 @@ nova-manage cell_v2 list_cells
 systemctl disable openstack-nova-api.service \
   openstack-nova-consoleauth.service openstack-nova-scheduler.service \
   openstack-nova-conductor.service openstack-nova-novncproxy.service
+
 systemctl stop openstack-nova-api.service \
   openstack-nova-consoleauth.service openstack-nova-scheduler.service \
   openstack-nova-conductor.service openstack-nova-novncproxy.service
+```
 
-
+#### nova resource create
+```
 pcs resource create openstack-nova-api systemd:openstack-nova-api meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create openstack-nova-consoleauth systemd:openstack-nova-consoleauth meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create openstack-nova-scheduler systemd:openstack-nova-scheduler meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create openstack-nova-conductor systemd:openstack-nova-conductor meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create openstack-nova-novncproxy systemd:openstack-nova-novncproxy meta interleave=true op monitor start-delay=10s --clone
 
 
 pcs constraint order openstack-nova-api-clone then openstack-nova-scheduler-clone id=order-openstack-nova-api-clone-openstack-nova-scheduler-clone-mandatory
-
-
 pcs constraint order openstack-nova-novncproxy-clone then openstack-nova-api-clone id=order-openstack-nova-novncproxy-clone-openstack-nova-api-clone-mandatory
-
-
 pcs constraint order openstack-nova-consoleauth-clone then openstack-nova-novncproxy-clone id=order-openstack-nova-consoleauth-clone-openstack-nova-novncproxy-clone-mandatory
-
-
 pcs constraint order openstack-nova-scheduler-clone then openstack-nova-conductor-clone id=order-openstack-nova-scheduler-clone-openstack-nova-conductor-clone-mandatory
-
-
 pcs constraint order httpd-clone then openstack-nova-consoleauth-clone id=order-httpd-clone-openstack-nova-consoleauth-clone-mandatory
 
 
 pcs constraint colocation add openstack-nova-api-clone with openstack-nova-novncproxy-clone id=colocation-openstack-nova-api-clone-openstack-nova-novncproxy-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add openstack-nova-scheduler-clone with openstack-nova-api-clone id=colocation-openstack-nova-scheduler-clone-openstack-nova-api-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add openstack-nova-conductor-clone with openstack-nova-scheduler-clone id=colocation-openstack-nova-conductor-clone-openstack-nova-scheduler-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add openstack-nova-novncproxy-clone with openstack-nova-consoleauth-clone id=colocation-openstack-nova-novncproxy-clone-openstack-nova-consoleauth-clone-INFINITY rsc-role=Started with-rsc-role=Master
+```
 
 
+### OpenStack Neutron
 
-################################## OpenStack Neutron
-
-
+```
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE neutron;"
-
-
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 
@@ -1052,7 +1052,7 @@ yum install -y openstack-neutron openstack-neutron-ml2 \
   openstack-neutron-linuxbridge ebtables
 
 
-cat << EOF > /etc/neutron/neutron.conf 
+cat << EOF > /etc/neutron/neutron.conf
 [DEFAULT]
 transport_url = rabbit://rabbit-user:CHANGEME@controllernode00.localdomain:5672,rabbit-user:CHANGEME@controllernode01.localdomain:5672,rabbit-user:CHANGEME@controllernode02.localdomain:5672/
 default_availability_zones = nova
@@ -1100,8 +1100,6 @@ sed -i 's/192.168.24.2/192.168.24.3/' /etc/neutron/neutron.conf
 sed -i 's/192.168.24.2/192.168.24.4/' /etc/neutron/neutron.conf
 
 
-
-
 cat << EOF > /etc/neutron/plugins/ml2/ml2_conf.ini
 [DEFAULT]
 [ml2]
@@ -1120,7 +1118,7 @@ vni_ranges = 1:1000
 EOF
 
 
-cat << EOF > /etc/neutron/plugins/ml2/linuxbridge_agent.ini 
+cat << EOF > /etc/neutron/plugins/ml2/linuxbridge_agent.ini
 [DEFAULT]
 [linux_bridge]
 physical_interface_mappings = provider_flat:eth1
@@ -1140,7 +1138,6 @@ sed -i 's/192.168.24.2/192.168.24.4/' /etc/neutron/plugins/ml2/linuxbridge_agent
 
 echo br_netfilter > /etc/modules-load.d/br_netfilter.conf
 
-
 modprobe br_netfilter
 
 
@@ -1153,14 +1150,14 @@ EOF
 sysctl -p
 
 
-cat << EOF > /etc/neutron/l3_agent.ini 
+cat << EOF > /etc/neutron/l3_agent.ini
 [DEFAULT]
 interface_driver = linuxbridge
 vrrp_confs = $state_path/vrrp
 EOF
 
 
-cat << EOF > /etc/neutron/dhcp_agent.ini 
+cat << EOF > /etc/neutron/dhcp_agent.ini
 [DEFAULT]
 interface_driver = linuxbridge
 enable_isolated_metadata = true
@@ -1168,7 +1165,7 @@ force_metadata = True
 EOF
 
 
-cat << EOF > /etc/neutron/metadata_agent.ini 
+cat << EOF > /etc/neutron/metadata_agent.ini
 [DEFAULT]
 nova_metadata_host = api.localdomain
 metadata_proxy_shared_secret = METADATA_SECRET
@@ -1186,87 +1183,42 @@ systemctl disable neutron-server.service \
   neutron-linuxbridge-agent.service neutron-dhcp-agent.service \
   neutron-metadata-agent.service neutron-l3-agent.service
 
-
 systemctl stop neutron-server.service \
   neutron-linuxbridge-agent.service neutron-dhcp-agent.service \
   neutron-metadata-agent.service neutron-l3-agent.service
+```
 
-
-## resources
-
+#### neutron resource create
+```
 pcs resource create neutron-server systemd:neutron-server meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create neutron-linuxbridge-agent systemd:neutron-linuxbridge-agent meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create neutron-dhcp-agent systemd:neutron-dhcp-agent meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create neutron-metadata-agent systemd:neutron-metadata-agent meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create neutron-l3-agent systemd:neutron-l3-agent meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create neutron-netns-cleanup systemd:neutron-netns-cleanup meta interleave=true op monitor start-delay=10s --clone
-
-
 pcs resource create neutron-linuxbridge-cleanup systemd:neutron-linuxbridge-cleanup meta interleave=true op monitor start-delay=10s --clone
 
 
-## constraint order
-
-
 pcs constraint order httpd-clone then neutron-server-clone id=order-httpd-clone-neutron-server-clone-mandatory
-
-
 pcs constraint order neutron-server-clone then neutron-linuxbridge-agent-clone id=order-neutron-server-clone-neutron-linuxbridge-agent-clone-mandatory
-
-
 pcs constraint order neutron-linuxbridge-agent-clone then neutron-dhcp-agent-clone id=order-neutron-linuxbridge-agent-clone-neutron-dhcp-agent-clone-mandatory
-
-
 pcs constraint order neutron-netns-cleanup-clone then neutron-linuxbridge-agent-clone id=order-neutron-netns-cleanup-clone-neutron-linuxbrige-agent-clone-mandatory
-
-
 pcs constraint order neutron-l3-agent-clone then neutron-metadata-agent-clone id=order-neutron-l3-agent-clone-neutron-metadata-agent-clone-mandatory
-
-
 pcs constraint order neutron-dhcp-agent-clone then neutron-l3-agent-clone id=order-neutron-dhcp-agent-clone-neutron-l3-agent-clone-mandatory
-
-
 pcs constraint order neutron-linuxbridge-cleanup-clone then neutron-netns-cleanup-clone id=order-neutron-linuxbridge-cleanup-clone-neutron-netns-cleanup-clone-mandatory
 
 
-## constraint colocation
-
-
 pcs constraint colocation add neutron-dhcp-agent-clone with neutron-linuxbridge-agent-clone id=colocation-neutron-dhcp-agent-clone-neutron-linuxbridge-agent-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add neutron-l3-agent-clone with neutron-dhcp-agent-clone id=colocation-neutron-l3-agent-clone-neutron-dhcp-agent-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add neutron-linuxbridge-agent-clone with neutron-netns-cleanup-clone id=colocation-neutron-linuxbridge-agent-clone-neutron-netns-cleanup-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add neutron-netns-cleanup-clone with neutron-linuxbridge-cleanup-clone id=colocation-neutron-netns-cleanup-clone-neutron-linuxbridge-cleanup-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add neutron-metadata-agent-clone with neutron-l3-agent-clone id=colocation-neutron-metadata-agent-clone-neutron-l3-agent-clone-INFINITY rsc-role=Started with-rsc-role=Master
+```
 
+### Cinder
 
-
-
-	
-
-################################## OpenStack Cinder
-
-
+```
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE cinder;"
-
-
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 
@@ -1275,8 +1227,6 @@ openstack user create --domain default --password CHANGEME cinder
 openstack role add --project service --user cinder admin
 openstack service create --name cinderv2 --description "OpenStack Block Storage" volumev2
 openstack service create --name cinderv3 --description "OpenStack Block Storage" volumev3
-
-
 
 
 openstack endpoint create --region RegionOne volumev2 public http://api.localdomain:8776/v2/%\(project_id\)s
@@ -1291,7 +1241,7 @@ openstack endpoint create --region RegionOne volumev3 admin http://api.localdoma
 yum install -y openstack-cinder
 
 
-cat << EOF > /etc/cinder/cinder.conf 
+cat << EOF > /etc/cinder/cinder.conf
 [DEFAULT]
 rootwrap_config = /etc/cinder/rootwrap.conf
 api_paste_confg = /etc/cinder/api-paste.ini
@@ -1342,48 +1292,33 @@ sed -i 's/192.168.24.2/192.168.24.3/g' /etc/cinder/cinder.conf
 sed -i 's/192.168.24.2/192.168.24.4/g' /etc/cinder/cinder.conf
 
 
-*** ceph.conf
-
-
 su -s /bin/sh -c "cinder-manage db sync" cinder
 
 
 systemctl disable openstack-cinder-api.service openstack-cinder-scheduler.service openstack-cinder-volume.service
-
-
 systemctl stop openstack-cinder-api.service openstack-cinder-scheduler.service openstack-cinder-volume.service
+```
 
-
+#### cinder resource create
+```
 pcs resource create openstack-cinder-api systemd:openstack-cinder-api meta interleave=true op monitor start-delay=60s --clone
-
-
 pcs resource create openstack-cinder-scheduler systemd:openstack-cinder-scheduler meta interleave=true op monitor start-delay=60s --clone
-
-
 pcs resource create openstack-cinder-volume systemd:openstack-cinder-volume op monitor start-delay=60s
 
 
 pcs constraint order httpd-clone then openstack-cinder-api-clone id=order-httpd-clone-openstack-cinder-api-clone-mandatory
-
-
 pcs constraint order openstack-cinder-scheduler-clone then openstack-cinder-volume id=order-openstack-cinder-scheduler-clone-openstack-cinder-volume-mandatory
-
-
 pcs constraint order openstack-cinder-api-clone then openstack-cinder-scheduler-clone id=order-openstack-cinder-api-clone-openstack-cinder-scheduler-clone-mandatory
 
 
 pcs constraint colocation add openstack-cinder-volume with openstack-cinder-scheduler-clone id=colocation-openstack-cinder-volume-openstack-cinder-scheduler-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add openstack-cinder-scheduler-clone with openstack-cinder-api-clone id=colocation-openstack-cinder-scheduler-clone-openstack-cinder-api-clone-INFINITY rsc-role=Started with-rsc-role=Master
-	
+```
 
-################################## OpenStack Heat
+### Heat
 
-
+```
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE heat;"
-
-
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON heat.* TO 'heat'@'%' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 mysql -u root -p'CHANGEME' -e "GRANT ALL PRIVILEGES ON heat.* TO 'heat'@'localhost' IDENTIFIED BY 'CHANGEME'; FLUSH PRIVILEGES"
 
@@ -1417,7 +1352,7 @@ yum install -y openstack-heat-api openstack-heat-api-cfn \
   openstack-heat-engine
 
 
-cat << EOF > /etc/heat/heat.conf 
+cat << EOF > /etc/heat/heat.conf
 [DEFAULT]
 transport_url = rabbit://rabbit-user:CHANGEME@controllernode00.localdomain:5672,rabbit-user:CHANGEME@controllernode01.localdomain:5672,rabbit-user:CHANGEME@controllernode02.localdomain:5672/
 heat_metadata_server_url = http://api.localdomain:8000
@@ -1464,44 +1399,77 @@ su -s /bin/sh -c "heat-manage db_sync" heat
 
 systemctl disable openstack-heat-api.service \
   openstack-heat-api-cfn.service openstack-heat-engine.service
-
-
 systemctl stop openstack-heat-api.service \
   openstack-heat-api-cfn.service openstack-heat-engine.service
+```
 
-
-
-
+#### heat resource create
+```
 pcs resource create openstack-heat-api systemd:openstack-heat-api meta interleave=true op monitor start-delay=60s --clone
-
-
 pcs resource create openstack-heat-api-cfn systemd:openstack-heat-api-cfn meta interleave=true op monitor start-delay=60s --clone
-
-
 pcs resource create openstack-heat-engine systemd:openstack-heat-engine meta interleave=true op monitor start-delay=60s --clone
 
-
 pcs constraint order httpd-clone then openstack-heat-api-clone id=order-httpd-clone-openstack-heat-api-clone-mandatory
-
-
 pcs constraint order openstack-heat-api-clone then openstack-heat-api-cfn-clone id=order-openstack-heat-api-clone-openstack-heat-api-cfn-clone-mandatory
-
-
 pcs constraint order openstack-heat-api-cfn-clone then openstack-heat-engine-clone id=openstack-heat-api-cfn-clone-openstack-heat-engine-clone-mandatory
 
-
 pcs constraint colocation add openstack-heat-api-cfn-clone with openstack-heat-api-clone id=colocation-openstack-heat-api-cfn-clone-openstack-heat-api-clone-INFINITY rsc-role=Started with-rsc-role=Master
-
-
 pcs constraint colocation add openstack-heat-api-clone with openstack-heat-engine-clone id=colocation-openstack-heat-api-clone-openstack-heat-engine-clone-INFINITY rsc-role=Started with-rsc-role=Master
-	
+```
+---
 
-################################## OpenStack Compute Nova
+## Post install
+
+### Ceph integration
+
+```
+yum install -y python-rbd ceph-common
 
 
-** Do host preparation before 
+cat << EOF > /etc/ceph/ceph.conf
+[global]
+fsid = 91b75b16-94a5-412b-aa34-ac367553ac5c
+mon_initial_members = controllernode00,controllernode01,controllernode02
+mon_host = 192.168.24.2,192.168.24.3,192.168.24.4
+auth_cluster_required = cephx
+auth_service_required = cephx
+auth_client_required = cephx
 
 
+[client]
+rbd_cache = true
+rbd_cache_writethrough_until_flush = true
+admin_socket = /var/run/ceph/$cluster-$type.$id.$pid.$cctid.asok
+log_file = /var/log/qemu/qemu-guest-$pid.log
+rbd_concurrent_management_ops = 20
+EOF
+
+
+cat << EOF > /etc/ceph/ceph.client.glance.keyring
+[client.glance]
+        key = AQDFED5cwTBwNxAAjUY2JvYo43ISYC1+kBcBkA==
+EOF
+
+cat << EOF > /etc/ceph/ceph.client.nova.keyring
+[client.nova]
+        key = AQDFED5cwTBwNxAAjUY2JvYo43ISYC1+kBcBkA==
+EOF
+
+cat << EOF > /etc/ceph/ceph.client.cinder.keyring
+[client.cinder]
+        key = AQDFED5cwTBwNxAAjUY2JvYo43ISYC1+kBcBkA==
+EOF
+
+* change the key with the right user key
+
+```
+---
+
+## Configure the compute nodes
+
+### Nova Compute
+
+```
 yum install -y openstack-nova-compute
 
 
@@ -1560,21 +1528,32 @@ novncproxy_base_url = http://api.localdomain:6080/vnc_auto.html
 api_paste_config=/etc/nova/api-paste.ini
 [libvirt]
 virt_type = kvm
+images_type = rbd
+images_rbd_pool = nova
+images_rbd_ceph_conf = /etc/ceph/ceph.conf
+rbd_user = nova
+rbd_secret_uuid = db690dd9-f395-47c2-bcf9-49e6de71b4dc
+inject_password = false
+inject_key = false
+inject_partition = -2
+live_migration_flag = "VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_PERSIST_DEST,VIR_MIGRATE_TUNNELLED"
+disk_cachemodes = "none"
 [scheduler]
 discover_hosts_in_cells_interval = 300
 EOF
 
-** sed
+
+* change virt_type to qemu if it's a virtual lab
+* change my_ip option with node ip address
 
 
-#
 systemctl enable libvirtd.service openstack-nova-compute.service
 systemctl start libvirtd.service openstack-nova-compute.service
-	
+```
 
-################################# OpenStack Compute Neutron
+### Neutron Agent
 
-
+```
 yum install -y openstack-neutron-linuxbridge ebtables ipset
 
 
@@ -1598,7 +1577,7 @@ password = CHANGEME
 EOF
 
 
-cat << EOF > /etc/neutron/plugins/ml2/linuxbridge_agent.ini 
+cat << EOF > /etc/neutron/plugins/ml2/linuxbridge_agent.ini
 [DEFAULT]
 [linux_bridge]
 physical_interface_mappings = provider_flat:eth1
@@ -1607,29 +1586,29 @@ enable_security_group = true
 firewall_driver = neutron.agent.linux.iptables_firewall.IptablesFirewallDriver
 [vxlan]
 enable_vxlan = true
-local_ip = 192.168.24.2
+local_ip = 192.168.24.5
 l2_population = true
 EOF
 
 
-** sed
+** change local_ip option with node ip address
 
 
 systemctl enable neutron-linuxbridge-agent.service
 systemctl start neutron-linuxbridge-agent.service
-	
+```
 
-################################## OpenStack Compute Cinder
+### Configure libvirtd to talk to ceph
 
+```
 yum install -y python-rbd ceph-common
-
 
 uuidgen
 
 cat << EOF > /etc/ceph/secret.xml
 <secret ephemeral='no' private='no'>
   <uuid>db690dd9-f395-47c2-bcf9-49e6de71b4dc</uuid>
-  <usage type='ceph'> 
+  <usage type='ceph'>
     <name>client.cinder secret</name>
   </usage>
 </secret>
@@ -1665,5 +1644,6 @@ virsh secret-define --file /etc/ceph/secret.xml
 
 
 virsh secret-set-value --secret db690dd9-f395-47c2-bcf9-49e6de71b4dc --base64 $(awk '/key/ {print $3}' /etc/ceph/ceph.client.cinder.keyring)
-
-
+```
+---
+#### That's all =)
