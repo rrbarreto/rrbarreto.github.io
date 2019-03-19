@@ -1031,7 +1031,7 @@ pcs constraint colocation add openstack-nova-novncproxy-clone with openstack-nov
 ```
 
 
-### OpenStack Neutron
+### Neutron
 
 ```
 mysql -u root -p'CHANGEME' -e "CREATE DATABASE neutron;"
@@ -1463,6 +1463,10 @@ EOF
 * change the key with the right user key
 
 ```
+
+### Tunning
+
+* Increase open limit files to RabbitMQ, MariaDB, httpd, haproxy services.
 ---
 
 ## Configure the compute nodes
