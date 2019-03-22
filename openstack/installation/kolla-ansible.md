@@ -202,26 +202,34 @@ cat << EOF > /etc/kolla/config/designate/pools.yaml
 - also_notifies: []
   attributes: {}
   description: Default Pool
-  id: 6a27377d-7992-49fc-a3c9-55aaca0918a0
+  id: {{ designate_pool_id }}
   name: default
   nameservers:
   - host: 192.168.24.3
     port: 53
   - host: 192.168.24.4
     port: 53
+  - host: 192.168.24.5
+    port: 53
   ns_records:
   - hostname: ns001.localdomain.
     priority: 1
   - hostname: ns002.localdomain.
     priority: 2
+  - hostname: ns003.localdomain.
+    priority: 3
   targets:
   - description: PowerDNS4 DNS Server
     masters:
-    - host: 192.168.24.2
+    - host: 192.168.24.3
+      port: 5354
+    - host: 192.168.24.4
+      port: 5354
+    - host: 192.168.24.5
       port: 5354
     options:
       api_endpoint: http://192.168.24.3:8081
-      api_token: aaaaaaaaaaaaaaaaaaaaaaaa
+      api_token: de9ad2e4-d89c-467a-b165-73014794699e
       host: 192.168.24.3
       port: '53'
     type: pdns4
@@ -304,7 +312,7 @@ kolla-ansible -i ~/multinode prechecks
 
 kolla-ansible -i ~/multinode deploy
 
-* if somenthing goes wrong if mariadb bootstrap, maybe it can help:
+* if somenthing goes wrong with mariadb bootstrap, maybe it can help:
 kolla-ansible -i ~/multinode mariadb_recovery
 ```
 ---
