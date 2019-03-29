@@ -16,7 +16,7 @@ nav_order: 3
 $ openstack stack create --parameter key_name=keyname \
 --parameter flavor=m1.medium \
 --parameter private_net=private \
---parameter public_net=public-fip 
+--parameter public_net=public-fip \
 --parameter server_name=pfsense-1 \
 --parameter image=pfSense \
 --template https://raw.githubusercontent.com/rrbarreto/openstack/master/heat/pfsense-instance.yaml \
